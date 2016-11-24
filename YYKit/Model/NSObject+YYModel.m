@@ -476,20 +476,24 @@ static force_inline id YYValueForMultiKeys(__unsafe_unretained NSDictionary *dic
 
 @implementation _YYModelMeta
 - (instancetype)initWithClass:(Class)cls {
+    // 根据类 生成 抽象的ClassInfo 类
     YYClassInfo *classInfo = [YYClassInfo classInfoWithClass:cls];
     if (!classInfo) return nil;
     self = [super init];
     
     // Get black list
+     //  黑名单，在转换过程中会忽略数组中属性
     NSSet *blacklist = nil;
     if ([cls respondsToSelector:@selector(modelPropertyBlacklist)]) {
         NSArray *properties = [(id<YYModel>)cls modelPropertyBlacklist];
+        NSLog(@"properties = %@", properties);
         if (properties) {
             blacklist = [NSSet setWithArray:properties];
         }
     }
     
     // Get white list
+     // 白名单，转换过程 中处理 数组内的属性，不处理数组外的数据
     NSSet *whitelist = nil;
     if ([cls respondsToSelector:@selector(modelPropertyWhitelist)]) {
         NSArray *properties = [(id<YYModel>)cls modelPropertyWhitelist];
@@ -499,6 +503,23 @@ static force_inline id YYValueForMultiKeys(__unsafe_unretained NSDictionary *dic
     }
     
     // Get container property's generic class
+    // 获取 容器内部制定的类型字典
+    /**
+     
+     + (NSDictionary *)modelContainerPropertyGenericClass {
+     return @{@"shadows" : [Shadow class],
+     @"borders" : Border.class,
+     @"attachments" : @"Attachment" };
+     }
+     
+     经过下边转换后得到：
+     @{
+     @"shadows" : Shadow,
+     @"borders" : Border,
+     @"attachments" : Attachment
+     };
+     
+     */
     NSDictionary *genericMapper = nil;
     if ([cls respondsToSelector:@selector(modelContainerPropertyGenericClass)]) {
         genericMapper = [(id<YYModel>)cls modelContainerPropertyGenericClass];
@@ -522,23 +543,42 @@ static force_inline id YYValueForMultiKeys(__unsafe_unretained NSDictionary *dic
     }
     
     // Create all property metas.
+    // 获取 所有的属性
     NSMutableDictionary *allPropertyMetas = [NSMutableDictionary new];
     YYClassInfo *curClassInfo = classInfo;
+    /**
+     *  向上层便利类，知道父类为空位置，目的是获取所有的属性
+     */
     while (curClassInfo && curClassInfo.superCls != nil) { // recursive parse super class, but ignore root class (NSObject/NSProxy)
         for (YYClassPropertyInfo *propertyInfo in curClassInfo.propertyInfos.allValues) {
+            //属性名称为空 忽略
             if (!propertyInfo.name) continue;
+            //在黑名单中 忽略
             if (blacklist && [blacklist containsObject:propertyInfo.name]) continue;
+             // 不在白名单中忽略
             if (whitelist && ![whitelist containsObject:propertyInfo.name]) continue;
+            /**
+             *  创建对该条属性的抽象类
+             *  classInfo
+             *  propertyInfo
+             *  genericMapper[propertyInfo.name] 容器内指定的类
+             */
             _YYModelPropertyMeta *meta = [_YYModelPropertyMeta metaWithClassInfo:classInfo
                                                                     propertyInfo:propertyInfo
                                                                          generic:genericMapper[propertyInfo.name]];
+            // 判断
             if (!meta || !meta->_name) continue;
             if (!meta->_getter || !meta->_setter) continue;
+            // 如果字典中存在，忽略
             if (allPropertyMetas[meta->_name]) continue;
+            // 给字典复制
             allPropertyMetas[meta->_name] = meta;
         }
+        // 当前的类 指向上一个类的父类
         curClassInfo = curClassInfo.superClassInfo;
     }
+    
+    // 给本类的属性_allPropertyMetas 赋值
     if (allPropertyMetas.count) _allPropertyMetas = allPropertyMetas.allValues.copy;
     
     // create mapper
@@ -546,19 +586,42 @@ static force_inline id YYValueForMultiKeys(__unsafe_unretained NSDictionary *dic
     NSMutableArray *keyPathPropertyMetas = [NSMutableArray new];
     NSMutableArray *multiKeysPropertyMetas = [NSMutableArray new];
     
+    /**
+     *  如果实现了 modelCustomPropertyMapper 方法
+     *
+     *  @param modelCustomPropertyMapper
+     *
+     */
     if ([cls respondsToSelector:@selector(modelCustomPropertyMapper)]) {
+        // 获取自定义的字典
         NSDictionary *customMapper = [(id <YYModel>)cls modelCustomPropertyMapper];
+         // 遍历字典
         [customMapper enumerateKeysAndObjectsUsingBlock:^(NSString *propertyName, NSString *mappedToKey, BOOL *stop) {
+             // 根据名字 在 全部属性字典中取出与之相对应的属性抽象类
             _YYModelPropertyMeta *propertyMeta = allPropertyMetas[propertyName];
             if (!propertyMeta) return;
+            // 已经找到了结果，可以删除掉，这样在下次查找的时候，就不用做多余的遍历了 ，能够节省时间
             [allPropertyMetas removeObjectForKey:propertyName];
             
             if ([mappedToKey isKindOfClass:[NSString class]]) {
                 if (mappedToKey.length == 0) return;
                 
+                // 给抽象类的_mappedToKey 赋值 标示要被映射的名称 下边的指的就是@"n",@"p"...
+                /*
+                 + (NSDictionary *)modelCustomPropertyMapper {
+                 return @{@"name" : @"n",
+                 @"page" : @"p",
+                 @"desc" : @"ext.desc",
+                 @"bookID" : @[@"id",@"ID",@"book_id"]};
+                 }
+                 */
                 propertyMeta->_mappedToKey = mappedToKey;
+                
+                // 映射对象 如果是keypath ，@"user.id"
                 NSArray *keyPath = [mappedToKey componentsSeparatedByString:@"."];
+                // 遍历数组 ，删除空字符串
                 for (NSString *onePath in keyPath) {
+                     // 如果存在空字符 则在原数组中删除
                     if (onePath.length == 0) {
                         NSMutableArray *tmp = keyPath.mutableCopy;
                         [tmp removeObject:@""];
@@ -566,10 +629,13 @@ static force_inline id YYValueForMultiKeys(__unsafe_unretained NSDictionary *dic
                         break;
                     }
                 }
+                // keypath 的个数大于1 说明为 有效路径
                 if (keyPath.count > 1) {
+                     // 赋值
                     propertyMeta->_mappedToKeyPath = keyPath;
                     [keyPathPropertyMetas addObject:propertyMeta];
                 }
+                 // 控制 propertyMeta 的 next 指针 指向下一个 映射
                 propertyMeta->_next = mapper[mappedToKey] ?: nil;
                 mapper[mappedToKey] = propertyMeta;
                 
@@ -580,13 +646,14 @@ static force_inline id YYValueForMultiKeys(__unsafe_unretained NSDictionary *dic
                     if (![oneKey isKindOfClass:[NSString class]]) continue;
                     if (oneKey.length == 0) continue;
                     
+                     // 如果映射的是数组，保存 数组到mappedToKeyArray 中， 否则保存 映射字符串
                     NSArray *keyPath = [oneKey componentsSeparatedByString:@"."];
                     if (keyPath.count > 1) {
                         [mappedToKeyArray addObject:keyPath];
                     } else {
                         [mappedToKeyArray addObject:oneKey];
                     }
-                    
+                     // 赋值
                     if (!propertyMeta->_mappedToKey) {
                         propertyMeta->_mappedToKey = oneKey;
                         propertyMeta->_mappedToKeyPath = keyPath.count > 1 ? keyPath : nil;

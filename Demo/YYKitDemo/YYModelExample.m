@@ -20,7 +20,7 @@
 
 @implementation YYBook
 @end
-// 添加注释, 测试添加注释, 测试添加注释, 测试添加注释, 测试添加注释, 测试添加注释, 测试添加注释, 测试添加注释, 测试添加注释, 测试
+
 static void SimpleObjectExample() {
     YYBook *book = [YYBook modelWithJSON:@"     \
     {                                           \
